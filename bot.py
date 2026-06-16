@@ -3,12 +3,35 @@ import os
 import json
 import base64
 import asyncio
+import logging
 import aiohttp
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+_fmt   = logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+_console = logging.StreamHandler()
+_console.setFormatter(_fmt)
+
+_file = logging.FileHandler("reflector.log", encoding="utf-8")
+_file.setFormatter(_fmt)
+
+logging.root.setLevel(_level)
+logging.root.addHandler(_console)
+logging.root.addHandler(_file)
+
+log = logging.getLogger("reflector")
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 SERVER_A_ID = 1516375508747685958  # Mirror FROM
@@ -104,9 +127,11 @@ def record_mirrored(channel_id: int, message_id: int) -> None:
 async def get_webhook(channel: discord.TextChannel) -> discord.Webhook:
     if channel.id in webhook_cache:
         return webhook_cache[channel.id]
+    log.debug("Fetching webhooks for #%s", channel.name)
     webhooks = await channel.webhooks()
     webhook = discord.utils.get(webhooks, name="MirrorWebhook")
     if webhook is None:
+        log.debug("Creating MirrorWebhook in #%s", channel.name)
         webhook = await channel.create_webhook(name="MirrorWebhook")
     webhook_cache[channel.id] = webhook
     return webhook
@@ -130,23 +155,28 @@ def translate_overwrites(source_overwrites: dict, guild_b: discord.Guild) -> dic
 
 
 async def get_or_create_mirror_category(
-    source_cat: discord.CategoryChannel, guild_b: discord.Guild
+    source_cat: discord.CategoryChannel, guild_b: discord.Guild, *, _sync: bool = False
 ) -> discord.CategoryChannel:
     key = str(source_cat.id)
-    overwrites = translate_overwrites(source_cat.overwrites, guild_b)
 
-    # If already mapped, sync settings and return
+    # If already mapped, optionally sync name+permissions and return
     if key in category_map:
         cat = guild_b.get_channel(category_map[key])
         if cat:
-            await cat.edit(name=source_cat.name, overwrites=overwrites)
+            if _sync:
+                overwrites = translate_overwrites(source_cat.overwrites, guild_b)
+                log.debug("Syncing category '%s'", source_cat.name)
+                await cat.edit(name=source_cat.name, overwrites=overwrites)
             return cat
 
     # Find by name or create fresh
+    overwrites = translate_overwrites(source_cat.overwrites, guild_b)
     cat = discord.utils.get(guild_b.categories, name=source_cat.name)
     if cat is None:
+        log.debug("Creating category '%s'", source_cat.name)
         cat = await guild_b.create_category(name=source_cat.name, overwrites=overwrites)
     else:
+        log.debug("Adopting existing category '%s'", source_cat.name)
         await cat.edit(overwrites=overwrites)
 
     category_map[key] = cat.id
@@ -188,6 +218,7 @@ async def get_or_create_mirror_channel(
     if isinstance(source, discord.TextChannel):
         mirror = discord.utils.get(guild_b.text_channels, name=source.name)
         if mirror is None:
+            log.debug("Creating text channel #%s", source.name)
             mirror = await guild_b.create_text_channel(
                 name=source.name,
                 category=mirror_cat,
@@ -202,6 +233,7 @@ async def get_or_create_mirror_channel(
     elif isinstance(source, discord.VoiceChannel):
         mirror = discord.utils.get(guild_b.voice_channels, name=source.name)
         if mirror is None:
+            log.debug("Creating voice channel #%s", source.name)
             mirror = await guild_b.create_voice_channel(
                 name=source.name,
                 category=mirror_cat,
@@ -215,6 +247,7 @@ async def get_or_create_mirror_channel(
     elif isinstance(source, discord.StageChannel):
         mirror = discord.utils.get(guild_b.stage_channels, name=source.name)
         if mirror is None:
+            log.debug("Creating stage channel #%s", source.name)
             mirror = await guild_b.create_stage_channel(
                 name=source.name,
                 category=mirror_cat,
@@ -226,6 +259,7 @@ async def get_or_create_mirror_channel(
     elif isinstance(source, discord.ForumChannel):
         mirror = discord.utils.get(guild_b.forums, name=source.name)
         if mirror is None:
+            log.debug("Creating forum channel #%s", source.name)
             mirror = await guild_b.create_forum(
                 name=source.name,
                 category=mirror_cat,
@@ -280,6 +314,7 @@ async def _sync_channel_settings(
             edits["user_limit"] = source.user_limit
 
     if edits:
+        log.debug("Updating channel #%s: %s", mirror.name, list(edits.keys()))
         await mirror.edit(**edits)
 
 
@@ -363,9 +398,10 @@ async def _assign_roles_in_b(b_member: discord.Member) -> None:
         return
 
     try:
+        log.debug("Updating roles for member %s", b_member)
         await b_member.edit(roles=desired, reason="Reflector: sync member roles")
     except discord.Forbidden:
-        print(f"[WARN] Cannot assign roles to {b_member} — check bot role hierarchy in Server B")
+        log.warning("Cannot assign roles to %s — check bot role hierarchy in Server B", b_member)
 
 
 # ---------------------------------------------------------------------------
@@ -381,6 +417,7 @@ async def sync_roles(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
         if key in role_map:
             b_role = guild_b.get_role(role_map[key])
             if b_role:
+                log.debug("Updating role '%s'", role.name)
                 await b_role.edit(
                     name=role.name,
                     color=role.color,
@@ -388,6 +425,7 @@ async def sync_roles(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
                     reason="Reflector: sync role",
                 )
         else:
+            log.debug("Creating role '%s'", role.name)
             b_role = await guild_b.create_role(
                 name=role.name,
                 color=role.color,
@@ -400,11 +438,63 @@ async def sync_roles(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
         save_role_map()
 
 
+async def sync_channel_positions(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
+    """Bulk-update all channel and category positions in Server B to match Server A.
+
+    Uses the raw ``PATCH /guilds/{id}/channels`` endpoint (one request for every
+    move) rather than editing channels individually, which gets rate-limited hard.
+
+    Note: this only sends ``position`` — Discord rejects a bulk request that
+    changes ``parent_id`` on more than one channel (error 40009). Moving a channel
+    into a different category is handled by ``_sync_channel_settings`` instead.
+    """
+    moves: list[dict] = []
+
+    for cat in guild_a.categories:
+        mirror_cat = guild_b.get_channel(category_map.get(str(cat.id), 0))
+        if mirror_cat:
+            moves.append({"id": mirror_cat.id, "position": cat.position})
+
+    for ch in guild_a.channels:
+        if isinstance(ch, discord.CategoryChannel):
+            continue
+        mirror_ch = guild_b.get_channel(channel_map.get(str(ch.id), 0))
+        if mirror_ch:
+            moves.append({"id": mirror_ch.id, "position": ch.position})
+
+    if not moves:
+        return
+    try:
+        log.debug("Bulk updating positions for %d channels/categories", len(moves))
+        await bot.http.bulk_channel_update(guild_b.id, moves)
+    except Exception as e:
+        log.warning("Could not bulk update channel positions: %s", e)
+
+
+_position_sync_task: asyncio.Task | None = None
+
+
+def _schedule_position_sync() -> None:
+    global _position_sync_task
+    if _position_sync_task and not _position_sync_task.done():
+        _position_sync_task.cancel()
+    _position_sync_task = asyncio.create_task(_run_position_sync())
+
+
+async def _run_position_sync() -> None:
+    await asyncio.sleep(2)
+    guild_a = bot.get_guild(SERVER_A_ID)
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if guild_a and guild_b:
+        log.debug("Running debounced position sync")
+        await sync_channel_positions(guild_a, guild_b)
+
+
 async def sync_channel_structure(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
     """Create/update all categories and channels from Server A in Server B."""
-    # Categories first so channels can be placed correctly
+    # Sync category names + permissions first (once each, not once per channel)
     for cat in guild_a.categories:
-        await get_or_create_mirror_category(cat, guild_b)
+        await get_or_create_mirror_category(cat, guild_b, _sync=True)
 
     # All other channels (text, voice, stage, forum)
     for channel in guild_a.channels:
@@ -413,7 +503,10 @@ async def sync_channel_structure(guild_a: discord.Guild, guild_b: discord.Guild)
         try:
             await get_or_create_mirror_channel(channel, guild_b)
         except Exception as e:
-            print(f"[WARN] Could not mirror channel #{channel.name}: {e}")
+            log.warning("Could not mirror channel #%s: %s", channel.name, e)
+
+    # Fix all positions in one bulk call
+    await sync_channel_positions(guild_a, guild_b)
 
 
 async def sync_member_roles(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
@@ -427,19 +520,26 @@ async def sync_member_roles(guild_a: discord.Guild, guild_b: discord.Guild) -> N
 # ---------------------------------------------------------------------------
 
 async def _download(url: str) -> bytes:
+    log.debug("GET %s", url)
     async with aiohttp.ClientSession() as session:
         async with session.get(url) as resp:
             resp.raise_for_status()
             return await resp.read()
 
 
+async def _api(route: discord.http.Route, **kwargs):
+    log.debug("API %s %s", route.method, route.path)
+    return await bot.http.request(route, **kwargs)
+
+
 async def sync_stickers(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
     try:
         stickers_a = await guild_a.fetch_stickers()
     except discord.HTTPException:
-        print("[WARN] Could not fetch stickers from Server A")
+        log.warning("Could not fetch stickers from Server A")
         return
 
+    log.debug("Fetching stickers from Server B")
     b_stickers = await guild_b.fetch_stickers()
     b_names = {s.name for s in b_stickers}
 
@@ -458,6 +558,7 @@ async def sync_stickers(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
             data = await _download(sticker.url)
             ext = "json" if sticker.format is discord.StickerFormatType.lottie else sticker.format.name
             file = discord.File(io.BytesIO(data), filename=f"{sticker.name}.{ext}")
+            log.debug("Creating sticker '%s'", sticker.name)
             b_sticker = await guild_b.create_sticker(
                 name=sticker.name,
                 description=sticker.description or sticker.name,
@@ -470,21 +571,21 @@ async def sync_stickers(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
             b_names.add(sticker.name)
             await asyncio.sleep(1)  # sticker creation is heavily rate-limited
         except Exception as e:
-            print(f"[WARN] Could not mirror sticker '{sticker.name}': {e}")
+            log.warning("Could not mirror sticker '%s': %s", sticker.name, e)
 
 
 async def sync_soundboard(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
     try:
         route = discord.http.Route("GET", "/guilds/{guild_id}/soundboard-sounds", guild_id=guild_a.id)
-        payload = await bot.http.request(route)
+        payload = await _api(route)
         sounds_a = payload.get("items", []) if isinstance(payload, dict) else payload
     except Exception as e:
-        print(f"[WARN] Could not fetch soundboard from Server A: {e}")
+        log.warning("Could not fetch soundboard from Server A: %s", e)
         return
 
     try:
         route = discord.http.Route("GET", "/guilds/{guild_id}/soundboard-sounds", guild_id=guild_b.id)
-        payload = await bot.http.request(route)
+        payload = await _api(route)
         sounds_b = payload.get("items", []) if isinstance(payload, dict) else payload
         b_sound_names = {s["name"] for s in sounds_b}
     except Exception:
@@ -518,13 +619,43 @@ async def sync_soundboard(guild_a: discord.Guild, guild_b: discord.Guild) -> Non
                 body["emoji_id"] = sound["emoji_id"]
 
             route = discord.http.Route("POST", "/guilds/{guild_id}/soundboard-sounds", guild_id=guild_b.id)
-            result = await bot.http.request(route, json=body)
+            result = await _api(route, json=body)
             sound_map[key] = int(result["sound_id"])
             save_sound_map()
             b_sound_names.add(sound["name"])
             await asyncio.sleep(1)
         except Exception as e:
-            print(f"[WARN] Could not mirror sound '{sound['name']}': {e}")
+            log.warning("Could not mirror sound '%s': %s", sound['name'], e)
+
+    # Remove sounds deleted from Server A
+    a_sound_ids = {str(s["sound_id"]) for s in sounds_a}
+    for a_id in list(sound_map.keys()):
+        if a_id not in a_sound_ids:
+            b_id = sound_map.pop(a_id)
+            try:
+                route = discord.http.Route(
+                    "DELETE",
+                    "/guilds/{guild_id}/soundboard-sounds/{sound_id}",
+                    guild_id=guild_b.id,
+                    sound_id=b_id,
+                )
+                await _api(route)
+            except Exception as e:
+                log.warning("Could not delete orphaned mirror sound %s: %s", b_id, e)
+    save_sound_map()
+
+
+@tasks.loop(hours=1)
+async def hourly_soundboard_sync() -> None:
+    guild_a = bot.get_guild(SERVER_A_ID)
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if guild_a and guild_b:
+        await sync_soundboard(guild_a, guild_b)
+
+
+@hourly_soundboard_sync.before_loop
+async def before_hourly_soundboard_sync() -> None:
+    await bot.wait_until_ready()
 
 
 async def sync_emojis(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
@@ -549,6 +680,7 @@ async def sync_emojis(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
                 for r in emoji.roles
                 if str(r.id) in role_map and guild_b.get_role(role_map[str(r.id)])
             ]
+            log.debug("Creating emoji '%s'", emoji.name)
             b_emoji = await guild_b.create_custom_emoji(
                 name=emoji.name,
                 image=image,
@@ -560,7 +692,7 @@ async def sync_emojis(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
             b_names.add(emoji.name)
             await asyncio.sleep(0.5)
         except discord.HTTPException as e:
-            print(f"[WARN] Could not mirror emoji '{emoji.name}': {e}")
+            log.warning("Could not mirror emoji '%s': %s", emoji.name, e)
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +701,7 @@ async def sync_emojis(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
 
 @bot.event
 async def on_ready() -> None:
-    print(f"Logged in as {bot.user}")
+    log.info("Logged in as %s", bot.user)
 
     # Load all persistent state up front so event handlers work immediately
     load_role_map()
@@ -584,32 +716,35 @@ async def on_ready() -> None:
     guild_a = bot.get_guild(SERVER_A_ID)
     guild_b = bot.get_guild(SERVER_B_ID)
     if guild_a is None or guild_b is None:
-        print("ERROR: Bot is not in both guilds.")
+        log.error("Bot is not in both guilds.")
         return
 
-    print("Syncing roles...")
+    log.info("Syncing roles...")
     await sync_roles(guild_a, guild_b)
 
-    print("Syncing channel structure and permissions...")
+    log.info("Syncing channel structure and permissions...")
     await sync_channel_structure(guild_a, guild_b)
 
-    print("Syncing guild icon...")
+    log.info("Syncing guild icon...")
     if guild_a.icon:
+        log.debug("Updating guild icon from Server A")
         await guild_b.edit(icon=await guild_a.icon.read())
 
-    print("Syncing member roles...")
+    log.info("Syncing member roles...")
     await sync_member_roles(guild_a, guild_b)
 
-    print("Syncing emojis...")
+    log.info("Syncing emojis...")
     await sync_emojis(guild_a, guild_b)
 
-    print("Syncing stickers...")
+    log.info("Syncing stickers...")
     await sync_stickers(guild_a, guild_b)
 
-    print("Syncing soundboard...")
+    log.info("Syncing soundboard...")
     await sync_soundboard(guild_a, guild_b)
+    if not hourly_soundboard_sync.is_running():
+        hourly_soundboard_sync.start()
 
-    print("Syncing message history...")
+    log.info("Syncing message history...")
     for channel in guild_a.text_channels:
         mirror = await get_or_create_mirror_channel(channel, guild_b)
         if not isinstance(mirror, discord.TextChannel):
@@ -627,7 +762,7 @@ async def on_ready() -> None:
 
     global history_sync_complete
     history_sync_complete = True
-    print("Startup sync complete — now mirroring live messages.")
+    log.info("Startup sync complete — now mirroring live messages.")
 
 
 # ---------------------------------------------------------------------------
@@ -670,7 +805,7 @@ async def on_guild_channel_create(channel) -> None:
         try:
             await get_or_create_mirror_channel(channel, guild_b)
         except Exception as e:
-            print(f"[WARN] Could not create mirror for #{channel.name}: {e}")
+            log.warning("Could not create mirror for #%s: %s", channel.name, e)
 
 
 @bot.event
@@ -688,10 +823,13 @@ async def on_guild_channel_update(before, after) -> None:
             return
         mirror_cat = guild_b.get_channel(category_map[key])
         if mirror_cat:
+            log.debug("Updating category '%s'", after.name)
             await mirror_cat.edit(
                 name=after.name,
                 overwrites=translate_overwrites(after.overwrites, guild_b),
             )
+        if before.position != after.position:
+            _schedule_position_sync()
         return
 
     key = str(after.id)
@@ -707,6 +845,8 @@ async def on_guild_channel_update(before, after) -> None:
             translate_overwrites(after.overwrites, guild_b),
             mirror_cat,
         )
+        if before.position != after.position or before.category != after.category:
+            _schedule_position_sync()
 
 
 @bot.event
@@ -734,7 +874,9 @@ async def on_guild_channel_delete(channel) -> None:
     if isinstance(mirror, discord.TextChannel):
         archive_cat = discord.utils.get(guild_b.categories, name="Archive")
         if archive_cat is None:
+            log.debug("Creating Archive category")
             archive_cat = await guild_b.create_category("Archive")
+        log.debug("Archiving channel #%s", mirror.name)
         await mirror.edit(
             category=archive_cat,
             overwrites={guild_b.default_role: discord.PermissionOverwrite(view_channel=False)},
@@ -742,6 +884,7 @@ async def on_guild_channel_delete(channel) -> None:
         )
     else:
         # For non-text channels, just delete the mirror outright
+        log.debug("Deleting mirror channel #%s", mirror.name)
         await mirror.delete(reason="Reflector: source channel deleted")
 
     channel_map.pop(key, None)
@@ -758,6 +901,7 @@ async def on_guild_update(before: discord.Guild, after: discord.Guild) -> None:
         return
     guild_b = bot.get_guild(SERVER_B_ID)
     if guild_b and after.icon:
+        log.debug("Updating guild icon")
         await guild_b.edit(icon=await after.icon.read())
 
 
@@ -772,6 +916,7 @@ async def on_guild_role_create(role: discord.Role) -> None:
     guild_b = bot.get_guild(SERVER_B_ID)
     if guild_b is None:
         return
+    log.debug("Creating role '%s'", role.name)
     b_role = await guild_b.create_role(
         name=role.name, color=role.color, permissions=role.permissions,
         reason="Reflector: role created in source",
@@ -792,6 +937,7 @@ async def on_guild_role_update(before: discord.Role, after: discord.Role) -> Non
         return
     b_role = guild_b.get_role(mapped_id)
     if b_role:
+        log.debug("Updating role '%s'", after.name)
         await b_role.edit(
             name=after.name, color=after.color, permissions=after.permissions,
             reason="Reflector: role updated in source",
@@ -810,6 +956,7 @@ async def on_guild_role_delete(role: discord.Role) -> None:
         return
     b_role = guild_b.get_role(mapped_id)
     if b_role:
+        log.debug("Deleting role id=%s", mapped_id)
         await b_role.delete(reason="Reflector: role deleted in source")
     save_role_map()
 
@@ -855,6 +1002,7 @@ async def on_guild_emojis_update(
                 b_emoji = discord.utils.get(guild_b.emojis, id=b_id)
                 if b_emoji:
                     try:
+                        log.debug("Deleting emoji id=%s", b_id)
                         await b_emoji.delete(reason="Reflector: source emoji deleted")
                     except discord.HTTPException:
                         pass
@@ -875,13 +1023,14 @@ async def on_guild_emojis_update(
                             if str(r.id) in role_map and guild_b.get_role(role_map[str(r.id)])
                         ]
                         try:
+                            log.debug("Updating emoji '%s'", emoji.name)
                             await b_emoji.edit(
                                 name=emoji.name,
                                 roles=roles,
                                 reason="Reflector: emoji updated",
                             )
                         except discord.HTTPException as e:
-                            print(f"[WARN] Could not update emoji '{emoji.name}': {e}")
+                            log.warning("Could not update emoji '%s': %s", emoji.name, e)
 
 
 @bot.event
@@ -914,10 +1063,77 @@ async def on_guild_stickers_update(
                 b_sticker = discord.utils.get(await guild_b.fetch_stickers(), id=b_id)
                 if b_sticker:
                     try:
+                        log.debug("Deleting sticker id=%s", b_id)
                         await b_sticker.delete(reason="Reflector: source sticker deleted")
                     except discord.HTTPException:
                         pass
                 save_sticker_map()
+
+
+@bot.event
+async def on_guild_soundboard_sound_create(sound) -> None:
+    if sound.guild_id != SERVER_A_ID:
+        return
+    guild_a = bot.get_guild(SERVER_A_ID)
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if guild_a and guild_b:
+        await sync_soundboard(guild_a, guild_b)
+
+
+@bot.event
+async def on_guild_soundboard_sound_update(before, after) -> None:
+    if after.guild_id != SERVER_A_ID:
+        return
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if guild_b is None:
+        return
+
+    b_id = sound_map.get(str(after.id))
+    if b_id is None:
+        return
+
+    try:
+        payload: dict = {"name": after.name, "volume": after.volume}
+        if after.emoji:
+            if isinstance(after.emoji, discord.PartialEmoji) and after.emoji.id:
+                payload["emoji_id"] = str(after.emoji.id)
+            elif after.emoji.name:
+                payload["emoji_name"] = after.emoji.name
+        route = discord.http.Route(
+            "PATCH",
+            "/guilds/{guild_id}/soundboard-sounds/{sound_id}",
+            guild_id=SERVER_B_ID,
+            sound_id=b_id,
+        )
+        await _api(route, json=payload)
+    except Exception as e:
+        log.warning("Could not update mirror sound '%s': %s", after.name, e)
+
+
+@bot.event
+async def on_guild_soundboard_sound_delete(sound) -> None:
+    if sound.guild_id != SERVER_A_ID:
+        return
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if guild_b is None:
+        return
+
+    b_id = sound_map.pop(str(sound.id), None)
+    if b_id is None:
+        return
+
+    try:
+        route = discord.http.Route(
+            "DELETE",
+            "/guilds/{guild_id}/soundboard-sounds/{sound_id}",
+            guild_id=SERVER_B_ID,
+            sound_id=b_id,
+        )
+        await _api(route)
+    except Exception as e:
+        log.warning("Could not delete mirror sound: %s", e)
+
+    save_sound_map()
 
 
 @bot.event
