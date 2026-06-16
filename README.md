@@ -29,6 +29,9 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 | `category_map.json` | Server A category ID → Server B category ID mapping |
 | `channel_map.json` | Server A channel ID → Server B channel ID mapping |
 | `member_roles.json` | Per-user Server A role IDs — roles can be restored without Server A being online |
+| `sticker_map.json` | Server A sticker ID → Server B sticker ID mapping |
+| `sound_map.json` | Server A soundboard sound ID → Server B sound ID mapping |
+| `emoji_map.json` | Server A emoji ID → Server B emoji ID mapping |
 
 ### Live event handling
 | Event | Action |
@@ -43,6 +46,9 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 | Member's roles change in Server A | Roles updated in Server B and saved to state |
 | Member joins Server B | Their Server A roles restored from saved state (no Server A lookup needed) |
 | Guild icon changed in Server A | Icon applied to Server B |
+| Emoji added / updated / deleted in Server A | Mirrored to Server B (name, image, role restrictions) |
+| Sticker added in Server A | Downloaded and created in Server B |
+| Sticker deleted in Server A | Deleted from Server B |
 
 ### Roadmap
 - [x] Copy between text channels
@@ -58,8 +64,9 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 - [x] Copy channel structure with categories
 - [x] Copy all channel types (text, voice, stage, forum)
 - [x] Assign roles to users in mirror guild (with saved state)
-- [ ] Copy soundboard audio files and configuration
-- [ ] Copy stickers
+- [x] Copy soundboard audio files and configuration
+- [x] Copy stickers
+- [x] Copy emojis
 
 ---
 

@@ -1,6 +1,9 @@
+import io
 import os
 import json
+import base64
 import asyncio
+import aiohttp
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -16,6 +19,9 @@ CATEGORY_MAP_FILE    = "category_map.json"
 CHANNEL_MAP_FILE     = "channel_map.json"
 MESSAGE_STATE_FILE   = "mirror_state.json"
 MEMBER_ROLES_FILE    = "member_roles.json"
+STICKER_MAP_FILE     = "sticker_map.json"
+SOUND_MAP_FILE       = "sound_map.json"
+EMOJI_MAP_FILE       = "emoji_map.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -29,6 +35,9 @@ category_map:     dict[str, int]        = {}  # str(A category ID) -> B category
 channel_map:      dict[str, int]        = {}  # str(A channel ID)  -> B channel ID
 message_state:    dict[str, int]        = {}  # str(A channel ID)  -> last mirrored message ID
 member_roles:     dict[str, list[int]]  = {}  # str(user ID)       -> [A role IDs]
+sticker_map:      dict[str, int]        = {}  # str(A sticker ID)  -> B sticker ID
+sound_map:        dict[str, int]        = {}  # str(A sound ID)    -> B sound ID
+emoji_map:        dict[str, int]        = {}  # str(A emoji ID)    -> B emoji ID
 history_sync_complete = False
 
 
@@ -67,6 +76,18 @@ def save_message_state() -> None: _save_json(MESSAGE_STATE_FILE, message_state)
 def load_member_roles() -> None:
     global member_roles; member_roles = _load_json(MEMBER_ROLES_FILE)
 def save_member_roles() -> None: _save_json(MEMBER_ROLES_FILE, member_roles)
+
+def load_sticker_map() -> None:
+    global sticker_map; sticker_map = _load_json(STICKER_MAP_FILE)
+def save_sticker_map() -> None: _save_json(STICKER_MAP_FILE, sticker_map)
+
+def load_sound_map() -> None:
+    global sound_map; sound_map = _load_json(SOUND_MAP_FILE)
+def save_sound_map() -> None: _save_json(SOUND_MAP_FILE, sound_map)
+
+def load_emoji_map() -> None:
+    global emoji_map; emoji_map = _load_json(EMOJI_MAP_FILE)
+def save_emoji_map() -> None: _save_json(EMOJI_MAP_FILE, emoji_map)
 
 
 def record_mirrored(channel_id: int, message_id: int) -> None:
@@ -402,6 +423,147 @@ async def sync_member_roles(guild_a: discord.Guild, guild_b: discord.Guild) -> N
 
 
 # ---------------------------------------------------------------------------
+# Sticker and soundboard sync
+# ---------------------------------------------------------------------------
+
+async def _download(url: str) -> bytes:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            return await resp.read()
+
+
+async def sync_stickers(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
+    try:
+        stickers_a = await guild_a.fetch_stickers()
+    except discord.HTTPException:
+        print("[WARN] Could not fetch stickers from Server A")
+        return
+
+    b_stickers = await guild_b.fetch_stickers()
+    b_names = {s.name for s in b_stickers}
+
+    for sticker in stickers_a:
+        key = str(sticker.id)
+        if key in sticker_map:
+            continue
+        if sticker.name in b_names:
+            existing = discord.utils.get(b_stickers, name=sticker.name)
+            if existing:
+                sticker_map[key] = existing.id
+                save_sticker_map()
+            continue
+
+        try:
+            data = await _download(sticker.url)
+            ext = "json" if sticker.format is discord.StickerFormatType.lottie else sticker.format.name
+            file = discord.File(io.BytesIO(data), filename=f"{sticker.name}.{ext}")
+            b_sticker = await guild_b.create_sticker(
+                name=sticker.name,
+                description=sticker.description or sticker.name,
+                emoji=sticker.emoji,
+                file=file,
+                reason="Reflector: sync sticker",
+            )
+            sticker_map[key] = b_sticker.id
+            save_sticker_map()
+            b_names.add(sticker.name)
+            await asyncio.sleep(1)  # sticker creation is heavily rate-limited
+        except Exception as e:
+            print(f"[WARN] Could not mirror sticker '{sticker.name}': {e}")
+
+
+async def sync_soundboard(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
+    try:
+        route = discord.http.Route("GET", "/guilds/{guild_id}/soundboard-sounds", guild_id=guild_a.id)
+        payload = await bot.http.request(route)
+        sounds_a = payload.get("items", []) if isinstance(payload, dict) else payload
+    except Exception as e:
+        print(f"[WARN] Could not fetch soundboard from Server A: {e}")
+        return
+
+    try:
+        route = discord.http.Route("GET", "/guilds/{guild_id}/soundboard-sounds", guild_id=guild_b.id)
+        payload = await bot.http.request(route)
+        sounds_b = payload.get("items", []) if isinstance(payload, dict) else payload
+        b_sound_names = {s["name"] for s in sounds_b}
+    except Exception:
+        sounds_b = []
+        b_sound_names = set()
+
+    for sound in sounds_a:
+        sound_id = sound["sound_id"]
+        key = str(sound_id)
+        if key in sound_map:
+            continue
+        if sound["name"] in b_sound_names:
+            existing = next((s for s in sounds_b if s["name"] == sound["name"]), None)
+            if existing:
+                sound_map[key] = int(existing["sound_id"])
+                save_sound_map()
+            continue
+
+        try:
+            cdn_url = f"https://cdn.discordapp.com/soundboard-sounds/{sound_id}"
+            audio = await _download(cdn_url)
+            b64 = base64.b64encode(audio).decode()
+            body = {
+                "name": sound["name"],
+                "sound": f"data:audio/ogg;base64,{b64}",
+                "volume": sound.get("volume", 1.0),
+            }
+            if sound.get("emoji_name"):
+                body["emoji_name"] = sound["emoji_name"]
+            if sound.get("emoji_id"):
+                body["emoji_id"] = sound["emoji_id"]
+
+            route = discord.http.Route("POST", "/guilds/{guild_id}/soundboard-sounds", guild_id=guild_b.id)
+            result = await bot.http.request(route, json=body)
+            sound_map[key] = int(result["sound_id"])
+            save_sound_map()
+            b_sound_names.add(sound["name"])
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"[WARN] Could not mirror sound '{sound['name']}': {e}")
+
+
+async def sync_emojis(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
+    b_emojis = guild_b.emojis
+    b_names  = {e.name for e in b_emojis}
+
+    for emoji in guild_a.emojis:
+        key = str(emoji.id)
+        if key in emoji_map:
+            continue
+        if emoji.name in b_names:
+            existing = discord.utils.get(b_emojis, name=emoji.name)
+            if existing:
+                emoji_map[key] = existing.id
+                save_emoji_map()
+            continue
+
+        try:
+            image = await emoji.read()
+            roles = [
+                guild_b.get_role(role_map[str(r.id)])
+                for r in emoji.roles
+                if str(r.id) in role_map and guild_b.get_role(role_map[str(r.id)])
+            ]
+            b_emoji = await guild_b.create_custom_emoji(
+                name=emoji.name,
+                image=image,
+                roles=roles,
+                reason="Reflector: sync emoji",
+            )
+            emoji_map[key] = b_emoji.id
+            save_emoji_map()
+            b_names.add(emoji.name)
+            await asyncio.sleep(0.5)
+        except discord.HTTPException as e:
+            print(f"[WARN] Could not mirror emoji '{emoji.name}': {e}")
+
+
+# ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
 
@@ -415,6 +577,9 @@ async def on_ready() -> None:
     load_channel_map()
     load_message_state()
     load_member_roles()
+    load_sticker_map()
+    load_sound_map()
+    load_emoji_map()
 
     guild_a = bot.get_guild(SERVER_A_ID)
     guild_b = bot.get_guild(SERVER_B_ID)
@@ -434,6 +599,15 @@ async def on_ready() -> None:
 
     print("Syncing member roles...")
     await sync_member_roles(guild_a, guild_b)
+
+    print("Syncing emojis...")
+    await sync_emojis(guild_a, guild_b)
+
+    print("Syncing stickers...")
+    await sync_stickers(guild_a, guild_b)
+
+    print("Syncing soundboard...")
+    await sync_soundboard(guild_a, guild_b)
 
     print("Syncing message history...")
     for channel in guild_a.text_channels:
@@ -651,6 +825,99 @@ async def on_member_update(before: discord.Member, after: discord.Member) -> Non
     guild_b = bot.get_guild(SERVER_B_ID)
     if guild_b:
         await apply_member_roles(after, guild_b)
+
+
+@bot.event
+async def on_guild_emojis_update(
+    guild: discord.Guild,
+    before: list[discord.Emoji],
+    after: list[discord.Emoji],
+) -> None:
+    if guild.id != SERVER_A_ID:
+        return
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if guild_b is None:
+        return
+
+    before_ids = {e.id for e in before}
+    after_ids  = {e.id for e in after}
+
+    # Created
+    if any(e.id not in before_ids for e in after):
+        await sync_emojis(guild, guild_b)
+
+    # Deleted
+    for emoji in before:
+        if emoji.id not in after_ids:
+            key = str(emoji.id)
+            b_id = emoji_map.pop(key, None)
+            if b_id:
+                b_emoji = discord.utils.get(guild_b.emojis, id=b_id)
+                if b_emoji:
+                    try:
+                        await b_emoji.delete(reason="Reflector: source emoji deleted")
+                    except discord.HTTPException:
+                        pass
+            save_emoji_map()
+
+    # Updated (name or role restrictions changed)
+    for emoji in after:
+        if emoji.id in before_ids:
+            old = discord.utils.get(before, id=emoji.id)
+            if old and (old.name != emoji.name or old.roles != emoji.roles):
+                b_id = emoji_map.get(str(emoji.id))
+                if b_id:
+                    b_emoji = discord.utils.get(guild_b.emojis, id=b_id)
+                    if b_emoji:
+                        roles = [
+                            guild_b.get_role(role_map[str(r.id)])
+                            for r in emoji.roles
+                            if str(r.id) in role_map and guild_b.get_role(role_map[str(r.id)])
+                        ]
+                        try:
+                            await b_emoji.edit(
+                                name=emoji.name,
+                                roles=roles,
+                                reason="Reflector: emoji updated",
+                            )
+                        except discord.HTTPException as e:
+                            print(f"[WARN] Could not update emoji '{emoji.name}': {e}")
+
+
+@bot.event
+async def on_guild_stickers_update(
+    guild: discord.Guild,
+    before: list[discord.GuildSticker],
+    after: list[discord.GuildSticker],
+) -> None:
+    if guild.id != SERVER_A_ID:
+        return
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if guild_b is None:
+        return
+
+    before_ids = {s.id for s in before}
+    after_ids  = {s.id for s in after}
+
+    # New stickers
+    for sticker in after:
+        if sticker.id not in before_ids:
+            await sync_stickers(guild, guild_b)
+            break  # sync_stickers handles all missing ones at once
+
+    # Deleted stickers
+    for sticker in before:
+        if sticker.id not in after_ids:
+            key = str(sticker.id)
+            b_id = sticker_map.pop(key, None)
+            if b_id:
+                b_sticker = discord.utils.get(await guild_b.fetch_stickers(), id=b_id)
+                if b_sticker:
+                    try:
+                        await b_sticker.delete(reason="Reflector: source sticker deleted")
+                    except discord.HTTPException:
+                        pass
+                save_sticker_map()
 
 
 @bot.event
