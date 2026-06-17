@@ -11,6 +11,7 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 - Impersonates the original sender (nickname + avatar) via webhooks
 - Copies attachments (images, files, etc.)
 - Preserves reply context as a quote prefix
+- Mirrors all reactions (emoji) from the original message to the copy, including reactions added after sync
 - Auto-creates missing channels in Server B on the fly
 
 ### Startup sync
@@ -25,6 +26,7 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 | File | Purpose |
 |---|---|
 | `mirror_state.json` | Last mirrored message ID per channel — history sync resumes from here |
+| `message_map.json` | Server A message ID → Server B message ID mapping — enables post-sync reaction mirroring |
 | `role_map.json` | Server A role ID → Server B role ID mapping |
 | `category_map.json` | Server A category ID → Server B category ID mapping |
 | `channel_map.json` | Server A channel ID → Server B channel ID mapping |
@@ -36,7 +38,9 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 ### Live event handling
 | Event | Action |
 |---|---|
-| New message in Server A | Mirrored to matching channel in Server B (channel created if missing) |
+| New message in Server A | Mirrored to matching channel in Server B with all reactions copied (channel created if missing) |
+| Reaction added to message in Server A | Same reaction added to mirrored message in Server B |
+| Reaction removed from message in Server A | Same reaction removed from mirrored message in Server B |
 | Channel renamed in Server A | Mirror channel renamed to match |
 | Channel settings changed | Mirror updated (topic, slowmode, NSFW, permissions) |
 | Channel deleted in Server A | Mirror moved to private `Archive` category in Server B |
