@@ -47,7 +47,7 @@ STICKER_MAP_FILE     = "sticker_map.json"
 SOUND_MAP_FILE       = "sound_map.json"
 EMOJI_MAP_FILE       = "emoji_map.json"
 
-TIMESTAMP_SUPPRESS_SECONDS = 180  # Omit timestamp if last message from same user within this time
+TIMESTAMP_SUPPRESS_SECONDS = 300  # Omit timestamp if last message from same user within this time 300s = 5 min
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -140,10 +140,7 @@ def format_timestamp_header(message: discord.Message) -> str:
     - R = relative time (2 hours ago)
     """
     unix_timestamp = int(message.created_at.timestamp())
-    header = (
-        f":incoming_envelope: {message.author.display_name}\n"
-        f"-# <t:{unix_timestamp}:d> <t:{unix_timestamp}:t> (<t:{unix_timestamp}:R>)"
-    )
+    header = (f"-#  {message.author.mention} <t:{unix_timestamp}:d> <t:{unix_timestamp}:t> (<t:{unix_timestamp}:R>)")
     return header
 
 
@@ -379,7 +376,7 @@ async def mirror_message(
     # Prepend timestamp header (unless last message was from same user within threshold)
     if should_show_timestamp(message, destination):
         timestamp_header = format_timestamp_header(message)
-        content = f"{timestamp_header}\n\n{content}" if content else timestamp_header
+        content = f"{timestamp_header}\n{content}" if content else timestamp_header
 
     if message.reference:
         try:
