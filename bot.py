@@ -35,8 +35,8 @@ logging.root.addHandler(_file)
 log = logging.getLogger("reflector")
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-SERVER_A_ID = 1516375508747685958  # Mirror FROM
-SERVER_B_ID = 494916777340436490   # Mirror TO
+SERVER_A_ID = int(os.getenv("SERVER_A_ID"))  # Mirror FROM
+SERVER_B_ID = int(os.getenv("SERVER_B_ID"))  # Mirror TO
 
 ROLE_MAP_FILE        = "role_map.json"
 CATEGORY_MAP_FILE    = "category_map.json"
