@@ -1,6 +1,7 @@
 import io
 import os
 import json
+import time
 import base64
 import asyncio
 import logging
@@ -46,6 +47,8 @@ STICKER_MAP_FILE     = "sticker_map.json"
 SOUND_MAP_FILE       = "sound_map.json"
 EMOJI_MAP_FILE       = "emoji_map.json"
 
+TIMESTAMP_SUPPRESS_SECONDS = 180  # Omit timestamp if last message from same user within this time
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -62,6 +65,7 @@ sticker_map:      dict[str, int]        = {}  # str(A sticker ID)  -> B sticker 
 sound_map:        dict[str, int]        = {}  # str(A sound ID)    -> B sound ID
 emoji_map:        dict[str, int]        = {}  # str(A emoji ID)    -> B emoji ID
 history_sync_complete = False
+last_mirrored_message: dict = {}  # Track last message per channel: {channel_id: {"author_id": int, "created_at": datetime}}
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +127,37 @@ def record_mirrored(channel_id: int, message_id: int) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def format_timestamp_header(message: discord.Message) -> str:
+    """Generate Discord timestamp header for a message.
+    
+    Format: [icon] USERNAME
+    -# <t:unix:d> <t:unix:t> (<t:unix:R>)
+    
+    Where:
+    - d = short date (Jan 1, 2021)
+    - t = short time (1:23 PM)
+    - R = relative time (2 hours ago)
+    """
+    unix_timestamp = int(message.created_at.timestamp())
+    header = (
+        f":incoming_envelope: {message.author.display_name}\n"
+        f"-# <t:{unix_timestamp}:d> <t:{unix_timestamp}:t> (<t:{unix_timestamp}:R>)"
+    )
+    return header
+
+
+def should_show_timestamp(message: discord.Message, destination: discord.TextChannel) -> bool:
+    """Check if timestamp should be shown.
+    
+    Omit timestamp if the last message in destination was from the same user
+    and posted within TIMESTAMP_SUPPRESS_SECONDS.
+    """
+    last = last_mirrored_message.get(destination.id)
+    if last and (last["author_id"] == message.author.id and 
+                 (message.created_at - last["created_at"]).total_seconds() < TIMESTAMP_SUPPRESS_SECONDS):
+        return False
+    return True
 
 async def get_webhook(channel: discord.TextChannel) -> discord.Webhook:
     if channel.id in webhook_cache:
@@ -329,6 +364,11 @@ async def mirror_message(
         files.append(await attachment.to_file())
 
     content = message.content
+    
+    # Prepend timestamp header (unless last message was from same user within threshold)
+    if should_show_timestamp(message, destination):
+        timestamp_header = format_timestamp_header(message)
+        content = f"{timestamp_header}\n\n{content}" if content else timestamp_header
 
     if message.reference:
         try:
@@ -350,6 +390,13 @@ async def mirror_message(
         files=files,
         allowed_mentions=discord.AllowedMentions.none(),
     )
+    
+    # Track this message for future timestamp suppression checks
+    last_mirrored_message[destination.id] = {
+        "author_id": message.author.id,
+        "created_at": message.created_at,
+    }
+    
     return True
 
 
