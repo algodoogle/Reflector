@@ -87,7 +87,14 @@ pip install discord.py python-dotenv
 
 ```
 DISCORD_TOKEN=your_bot_token_here
+LOG_LEVEL=DEBUG
+CHANNEL_BLACKLIST=
 ```
+
+**Environment variables:**
+- `DISCORD_TOKEN` — Your bot's token from the Discord Developer Portal
+- `LOG_LEVEL` — Logging level (DEBUG, INFO, WARNING, ERROR)
+- `CHANNEL_BLACKLIST` — *Optional* — Comma-separated channel IDs to exclude from startup history sync. Blacklisted channels will still receive live messages after startup completes. Spaces are supported: `123, 456, 789`
 
 ### 3. Configure server IDs
 
