@@ -34,7 +34,7 @@ logging.root.addHandler(_file)
 log = logging.getLogger("reflector")
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-SERVER_A_ID = 1516375508747685958  # Mirror FROM
+SERVER_A_ID = 279244769807564800  # Mirror FROM
 SERVER_B_ID = 494916777340436490   # Mirror TO
 
 ROLE_MAP_FILE        = "role_map.json"
@@ -324,8 +324,19 @@ async def mirror_message(
     """Send one message to the destination channel via webhook. Returns True if sent."""
     webhook = await get_webhook(destination)
 
+    # Attachments larger than Server B's upload limit can't be re-uploaded
+    # (413 Payload Too Large) — link to the original instead.
+    size_limit = destination.guild.filesize_limit
     files = []
+    oversized_links = []
     for attachment in message.attachments:
+        if attachment.size > size_limit:
+            log.warning(
+                "Attachment '%s' (%d B) exceeds Server B limit (%d B) — linking instead",
+                attachment.filename, attachment.size, size_limit,
+            )
+            oversized_links.append(attachment.url)
+            continue
         files.append(await attachment.to_file())
 
     content = message.content
@@ -339,6 +350,9 @@ async def mirror_message(
             )
         except Exception:
             pass
+
+    if oversized_links:
+        content = (content + "\n" + "\n".join(oversized_links)).strip()
 
     if not content and not files:
         return False
@@ -719,30 +733,32 @@ async def on_ready() -> None:
         log.error("Bot is not in both guilds.")
         return
 
-    log.info("Syncing roles...")
-    await sync_roles(guild_a, guild_b)
+    #log.info("Syncing roles...")
+    #await sync_roles(guild_a, guild_b)
 
-    log.info("Syncing channel structure and permissions...")
-    await sync_channel_structure(guild_a, guild_b)
+    #log.info("Syncing channel structure and permissions...")
+    #await sync_channel_structure(guild_a, guild_b)
 
     log.info("Syncing guild icon...")
     if guild_a.icon:
         log.debug("Updating guild icon from Server A")
         await guild_b.edit(icon=await guild_a.icon.read())
 
-    log.info("Syncing member roles...")
-    await sync_member_roles(guild_a, guild_b)
+    #log.info("Syncing member roles...")
+    #await sync_member_roles(guild_a, guild_b)
 
-    log.info("Syncing emojis...")
-    await sync_emojis(guild_a, guild_b)
+    #log.info("Syncing emojis...")
+    #await sync_emojis(guild_a, guild_b)
 
-    log.info("Syncing stickers...")
-    await sync_stickers(guild_a, guild_b)
+    #log.info("Syncing stickers...")
+    #await sync_stickers(guild_a, guild_b)
 
+    """
     log.info("Syncing soundboard...")
     await sync_soundboard(guild_a, guild_b)
     if not hourly_soundboard_sync.is_running():
         hourly_soundboard_sync.start()
+    """
 
     log.info("Syncing message history...")
     for channel in guild_a.text_channels:
@@ -757,7 +773,10 @@ async def on_ready() -> None:
             record_mirrored(channel.id, message.id)
             if message.author.bot:
                 continue
-            await mirror_message(message, mirror)
+            try:
+                await mirror_message(message, mirror)
+            except Exception as e:
+                log.warning("Could not mirror message %s in #%s: %s", message.id, channel.name, e)
             await asyncio.sleep(0.5)
 
     global history_sync_complete
@@ -1068,72 +1087,6 @@ async def on_guild_stickers_update(
                     except discord.HTTPException:
                         pass
                 save_sticker_map()
-
-
-@bot.event
-async def on_guild_soundboard_sound_create(sound) -> None:
-    if sound.guild_id != SERVER_A_ID:
-        return
-    guild_a = bot.get_guild(SERVER_A_ID)
-    guild_b = bot.get_guild(SERVER_B_ID)
-    if guild_a and guild_b:
-        await sync_soundboard(guild_a, guild_b)
-
-
-@bot.event
-async def on_guild_soundboard_sound_update(before, after) -> None:
-    if after.guild_id != SERVER_A_ID:
-        return
-    guild_b = bot.get_guild(SERVER_B_ID)
-    if guild_b is None:
-        return
-
-    b_id = sound_map.get(str(after.id))
-    if b_id is None:
-        return
-
-    try:
-        payload: dict = {"name": after.name, "volume": after.volume}
-        if after.emoji:
-            if isinstance(after.emoji, discord.PartialEmoji) and after.emoji.id:
-                payload["emoji_id"] = str(after.emoji.id)
-            elif after.emoji.name:
-                payload["emoji_name"] = after.emoji.name
-        route = discord.http.Route(
-            "PATCH",
-            "/guilds/{guild_id}/soundboard-sounds/{sound_id}",
-            guild_id=SERVER_B_ID,
-            sound_id=b_id,
-        )
-        await _api(route, json=payload)
-    except Exception as e:
-        log.warning("Could not update mirror sound '%s': %s", after.name, e)
-
-
-@bot.event
-async def on_guild_soundboard_sound_delete(sound) -> None:
-    if sound.guild_id != SERVER_A_ID:
-        return
-    guild_b = bot.get_guild(SERVER_B_ID)
-    if guild_b is None:
-        return
-
-    b_id = sound_map.pop(str(sound.id), None)
-    if b_id is None:
-        return
-
-    try:
-        route = discord.http.Route(
-            "DELETE",
-            "/guilds/{guild_id}/soundboard-sounds/{sound_id}",
-            guild_id=SERVER_B_ID,
-            sound_id=b_id,
-        )
-        await _api(route)
-    except Exception as e:
-        log.warning("Could not delete mirror sound: %s", e)
-
-    save_sound_map()
 
 
 @bot.event
