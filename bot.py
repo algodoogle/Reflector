@@ -41,6 +41,7 @@ ROLE_MAP_FILE        = "role_map.json"
 CATEGORY_MAP_FILE    = "category_map.json"
 CHANNEL_MAP_FILE     = "channel_map.json"
 MESSAGE_STATE_FILE   = "mirror_state.json"
+MESSAGE_MAP_FILE     = "message_map.json"
 MEMBER_ROLES_FILE    = "member_roles.json"
 STICKER_MAP_FILE     = "sticker_map.json"
 SOUND_MAP_FILE       = "sound_map.json"
@@ -61,6 +62,7 @@ role_map:         dict[str, int]        = {}  # str(A role ID)     -> B role ID
 category_map:     dict[str, int]        = {}  # str(A category ID) -> B category ID
 channel_map:      dict[str, int]        = {}  # str(A channel ID)  -> B channel ID
 message_state:    dict[str, int]        = {}  # str(A channel ID)  -> last mirrored message ID
+message_map:      dict[str, int]        = {}  # str(A message ID)  -> B message ID
 member_roles:     dict[str, list[int]]  = {}  # str(user ID)       -> [A role IDs]
 sticker_map:      dict[str, int]        = {}  # str(A sticker ID)  -> B sticker ID
 sound_map:        dict[str, int]        = {}  # str(A sound ID)    -> B sound ID
@@ -100,6 +102,10 @@ def load_message_state() -> None:
     global message_state; message_state = _load_json(MESSAGE_STATE_FILE)
 def save_message_state() -> None: _save_json(MESSAGE_STATE_FILE, message_state)
 
+def load_message_map() -> None:
+    global message_map; message_map = _load_json(MESSAGE_MAP_FILE)
+def save_message_map() -> None: _save_json(MESSAGE_MAP_FILE, message_map)
+
 def load_member_roles() -> None:
     global member_roles; member_roles = _load_json(MEMBER_ROLES_FILE)
 def save_member_roles() -> None: _save_json(MEMBER_ROLES_FILE, member_roles)
@@ -122,6 +128,11 @@ def record_mirrored(channel_id: int, message_id: int) -> None:
     if message_state.get(key, 0) < message_id:
         message_state[key] = message_id
         save_message_state()
+
+
+def record_message_map(a_message_id: int, b_message_id: int) -> None:
+    message_map[str(a_message_id)] = b_message_id
+    save_message_map()
 
 
 # ---------------------------------------------------------------------------
@@ -322,6 +333,20 @@ async def _sync_channel_settings(
         await mirror.edit(**edits)
 
 
+async def copy_message_reactions(
+    source: discord.Message, destination: discord.Message
+) -> None:
+    """Copy all reactions from source message to destination message."""
+    for reaction in source.reactions:
+        try:
+            log.debug("Adding reaction %s to mirrored message", reaction.emoji)
+            await destination.add_reaction(reaction.emoji)
+        except discord.HTTPException as e:
+            log.warning("Could not add reaction %s: %s", reaction.emoji, e)
+        except Exception as e:
+            log.warning("Unexpected error adding reaction %s: %s", reaction.emoji, e)
+
+
 async def mirror_message(
     message: discord.Message, destination: discord.TextChannel
 ) -> bool:
@@ -361,13 +386,22 @@ async def mirror_message(
     if not content and not files:
         return False
 
-    await webhook.send(
+    mirrored_msg = await webhook.send(
         content=content or None,
         username=message.author.display_name,
         avatar_url=message.author.display_avatar.url,
         files=files,
         allowed_mentions=discord.AllowedMentions.none(),
+        wait=True,
     )
+    
+    # Record the mapping for post-sync reaction tracking
+    record_message_map(message.id, mirrored_msg.id)
+    
+    # Mirror reactions from the original message
+    if message.reactions:
+        await copy_message_reactions(message, mirrored_msg)
+    
     return True
 
 
@@ -726,6 +760,7 @@ async def on_ready() -> None:
     load_category_map()
     load_channel_map()
     load_message_state()
+    load_message_map()
     load_member_roles()
     load_sticker_map()
     load_sound_map()
@@ -1103,6 +1138,74 @@ async def on_member_join(member: discord.Member) -> None:
         return
     # member object is passed directly — no cache lookup, no Server A needed
     await _assign_roles_in_b(member)
+
+
+@bot.event
+async def on_reaction_add(reaction: discord.Reaction, user: discord.User) -> None:
+    if not history_sync_complete:
+        return
+    if reaction.message.guild.id != SERVER_A_ID:
+        return
+    
+    # Look up the mirrored message
+    b_message_id = message_map.get(str(reaction.message.id))
+    if not b_message_id:
+        return
+    
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if not guild_b:
+        return
+    
+    # Find the channel in Server B
+    b_channel_id = channel_map.get(str(reaction.message.channel.id))
+    if not b_channel_id:
+        return
+    
+    b_channel = guild_b.get_channel(b_channel_id)
+    if not isinstance(b_channel, discord.TextChannel):
+        return
+    
+    try:
+        b_message = await b_channel.fetch_message(b_message_id)
+        await b_message.add_reaction(reaction.emoji)
+    except discord.HTTPException as e:
+        log.debug("Could not add reaction %s to mirrored message: %s", reaction.emoji, e)
+    except Exception as e:
+        log.warning("Unexpected error adding reaction to mirrored message: %s", e)
+
+
+@bot.event
+async def on_reaction_remove(reaction: discord.Reaction, user: discord.User) -> None:
+    if not history_sync_complete:
+        return
+    if reaction.message.guild.id != SERVER_A_ID:
+        return
+    
+    # Look up the mirrored message
+    b_message_id = message_map.get(str(reaction.message.id))
+    if not b_message_id:
+        return
+    
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if not guild_b:
+        return
+    
+    # Find the channel in Server B
+    b_channel_id = channel_map.get(str(reaction.message.channel.id))
+    if not b_channel_id:
+        return
+    
+    b_channel = guild_b.get_channel(b_channel_id)
+    if not isinstance(b_channel, discord.TextChannel):
+        return
+    
+    try:
+        b_message = await b_channel.fetch_message(b_message_id)
+        await b_message.remove_reaction(reaction.emoji, bot.user)
+    except discord.HTTPException as e:
+        log.debug("Could not remove reaction %s from mirrored message: %s", reaction.emoji, e)
+    except Exception as e:
+        log.warning("Unexpected error removing reaction from mirrored message: %s", e)
 
 
 bot.run(TOKEN)

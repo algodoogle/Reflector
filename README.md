@@ -11,6 +11,7 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 - Impersonates the original sender (nickname + avatar) via webhooks
 - Copies attachments (images, files, etc.)
 - Preserves reply context as a quote prefix
+- Mirrors all reactions (emoji) from the original message to the copy, including reactions added after sync
 - Auto-creates missing channels in Server B on the fly
 
 ### Startup sync
@@ -22,21 +23,27 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 - Assigns Server B members the roles that match their Server A roles
 
 ### State files (auto-created at runtime)
-| File | Purpose |
-|---|---|
-| `mirror_state.json` | Last mirrored message ID per channel — history sync resumes from here |
-| `role_map.json` | Server A role ID → Server B role ID mapping |
-| `category_map.json` | Server A category ID → Server B category ID mapping |
-| `channel_map.json` | Server A channel ID → Server B channel ID mapping |
-| `member_roles.json` | Per-user Server A role IDs — roles can be restored without Server A being online |
-| `sticker_map.json` | Server A sticker ID → Server B sticker ID mapping |
-| `sound_map.json` | Server A soundboard sound ID → Server B sound ID mapping |
-| `emoji_map.json` | Server A emoji ID → Server B emoji ID mapping |
+
+All state files are JSON format. They persist across bot restarts so syncing can resume seamlessly.
+
+| File | Purpose | Format |
+|---|---|---|
+| `mirror_state.json` | Last synced message ID per channel — history sync resumes from here on restart | channel_id : message_id |
+| `message_map.json` | Server A message ID → Server B message ID mapping — enables post-sync reaction mirroring | a_message_id : b_message_id |
+| `role_map.json` | Server A role ID → Server B role ID mapping — created during startup role sync | a_role_id : b_role_id |
+| `category_map.json` | Server A category ID → Server B category ID mapping — used for channel organization | a_category_id : b_category_id |
+| `channel_map.json` | Server A text/voice/forum channel ID → Server B channel ID mapping | a_channel_id : b_channel_id |
+| `member_roles.json` | Per-user: Server A user ID → list of their Server A role IDs — allows role restoration when Server A is offline | user_id : [role_id, role_id, ...] |
+| `sticker_map.json` | Server A sticker ID → Server B sticker ID mapping — synced when stickers are added | a_sticker_id : b_sticker_id |
+| `sound_map.json` | Server A soundboard sound ID → Server B sound ID mapping | a_sound_id : b_sound_id |
+| `emoji_map.json` | Server A emoji ID → Server B emoji ID mapping — custom emojis are copied when added | a_emoji_id : b_emoji_id |
 
 ### Live event handling
 | Event | Action |
 |---|---|
-| New message in Server A | Mirrored to matching channel in Server B (channel created if missing) |
+| New message in Server A | Mirrored to matching channel in Server B with all reactions copied (channel created if missing) |
+| Reaction added to message in Server A | Same reaction added to mirrored message in Server B |
+| Reaction removed from message in Server A | Same reaction removed from mirrored message in Server B |
 | Channel renamed in Server A | Mirror channel renamed to match |
 | Channel settings changed | Mirror updated (topic, slowmode, NSFW, permissions) |
 | Channel deleted in Server A | Mirror moved to private `Archive` category in Server B |
