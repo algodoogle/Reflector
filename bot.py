@@ -432,7 +432,12 @@ async def mirror_message(
     if oversized_links:
         content = (content + "\n" + "\n".join(oversized_links)).strip()
 
+    # Nothing to send? Return
     if not content and not files:
+        return False
+    
+    # Message is an automated pin notification from discord? Return
+    if message.type == discord.MessageType.pins_add:
         return False
 
     mirrored_msg = await webhook.send(
@@ -444,6 +449,14 @@ async def mirror_message(
         wait=True,
     )
     
+    # If the original message is pinned, pin the mirrored message as well
+    if message.pinned:
+        log.debug("Pinned message %s, mirroring pinned message %s", message.id, mirrored_msg.id)
+        try:
+            await mirrored_msg.pin()
+        except Exception as e:
+            log.error("Failed to pin mirrored message: %s", e)
+
     # Track this message for future timestamp suppression checks
     last_mirrored_message[destination.id] = {
         "author_id": message.author.id,
@@ -1260,6 +1273,55 @@ async def on_reaction_remove(reaction: discord.Reaction, user: discord.User) -> 
         log.debug("Could not remove reaction %s from mirrored message: %s", reaction.emoji, e)
     except Exception as e:
         log.warning("Unexpected error removing reaction from mirrored message: %s", e)
+
+
+@bot.event
+async def on_guild_channel_pins_update(channel: discord.TextChannel, last_pin) -> None:
+    log.debug("on_guild_channel_pins_update for %s", channel.name)
+    if channel.guild.id != SERVER_A_ID:
+        return
+
+    guild_b = bot.get_guild(SERVER_B_ID)
+    if not guild_b:
+        return
+
+    # Find corresponding channel in Server B
+    channel_b_id = channel_map.get(str(channel.id))
+    if not channel_b_id:
+        return
+
+    channel_b = guild_b.get_channel(channel_b_id)
+    if not isinstance(channel_b, discord.TextChannel):
+        return
+
+    # Get pinned messages in both channels
+    channel_a_pins = [msg async for msg in channel.pins()]
+    channel_b_pins = [msg async for msg in channel_b.pins()]
+
+    # Create a set of message IDs already pinned in B
+    channel_b_pin_ids = {msg.id for msg in channel_b_pins}
+
+    # Create list of messages that are pinned in A but not in B
+    msgs_to_pin = []
+    for msg_a in channel_a_pins:
+        b_id = message_map.get(str(msg_a.id))
+        if b_id and int(b_id) not in channel_b_pin_ids:
+            msgs_to_pin.append(msg_a)
+
+    # Pin any messages that are pinned in A but not yet pinned in B
+    if msgs_to_pin:
+        for msg_a in msgs_to_pin:
+            b_id = message_map.get(str(msg_a.id))
+            try:
+                log.debug("Pinning message %s", msg_a.id)
+                msg_b = await channel_b.fetch_message(int(b_id))
+                await msg_b.pin()
+            except Exception as e:
+                log.warning(
+                    "Could not pin mirrored message for #%s: %s",
+                    channel.name,
+                    e,
+                )
 
 
 bot.run(TOKEN)
