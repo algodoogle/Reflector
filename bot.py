@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import json
 import time
 import base64
@@ -379,6 +380,15 @@ async def copy_message_reactions(
             log.warning("Unexpected error adding reaction %s: %s", reaction.emoji, e)
 
 
+def translate_role_mentions(content: str, a_message: discord.Message) -> str:
+    """Replace role mentions with their Server B equivalents using role_map.json."""
+    for a_role in a_message.role_mentions:
+        b_role_id = role_map.get(str(a_role.id))
+        if b_role_id:
+            content = content.replace(f"<@&{a_role.id}>", f"<@&{b_role_id}>")
+    return content
+
+
 async def mirror_message(
     message: discord.Message, destination: discord.TextChannel
 ) -> bool:
@@ -401,6 +411,9 @@ async def mirror_message(
         files.append(await attachment.to_file())
 
     content = message.content
+    
+    # Translate role mentions from Server A IDs to Server B IDs
+    content = translate_role_mentions(content, message)
     
     # Prepend timestamp header (unless last message was from same user within threshold)
     if should_show_timestamp(message, destination):
@@ -814,25 +827,25 @@ async def on_ready() -> None:
         log.error("Bot is not in both guilds.")
         return
 
-    #log.info("Syncing roles...")
-    #await sync_roles(guild_a, guild_b)
+    log.info("Syncing roles...")
+    await sync_roles(guild_a, guild_b)
 
-    #log.info("Syncing channel structure and permissions...")
-    #await sync_channel_structure(guild_a, guild_b)
+    log.info("Syncing channel structure and permissions...")
+    await sync_channel_structure(guild_a, guild_b)
 
     log.info("Syncing guild icon...")
     if guild_a.icon:
         log.debug("Updating guild icon from Server A")
         await guild_b.edit(icon=await guild_a.icon.read())
 
-    #log.info("Syncing member roles...")
-    #await sync_member_roles(guild_a, guild_b)
+    log.info("Syncing member roles...")
+    await sync_member_roles(guild_a, guild_b)
 
-    #log.info("Syncing emojis...")
-    #await sync_emojis(guild_a, guild_b)
+    # log.info("Syncing emojis...")
+    # await sync_emojis(guild_a, guild_b)
 
-    #log.info("Syncing stickers...")
-    #await sync_stickers(guild_a, guild_b)
+    # log.info("Syncing stickers...")
+    # await sync_stickers(guild_a, guild_b)
 
     """
     log.info("Syncing soundboard...")
