@@ -46,6 +46,10 @@ STICKER_MAP_FILE     = "sticker_map.json"
 SOUND_MAP_FILE       = "sound_map.json"
 EMOJI_MAP_FILE       = "emoji_map.json"
 
+# Parse channel blacklist from env (comma-separated channel IDs)
+_blacklist_str = os.getenv("CHANNEL_BLACKLIST", "").strip()
+CHANNEL_BLACKLIST = set(int(cid) for cid in _blacklist_str.split(",") if cid.strip().isdigit())
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -762,6 +766,10 @@ async def on_ready() -> None:
 
     log.info("Syncing message history...")
     for channel in guild_a.text_channels:
+        if channel.id in CHANNEL_BLACKLIST:
+            log.debug("Skipping blacklisted channel #%s during history sync", channel.name)
+            continue
+        
         mirror = await get_or_create_mirror_channel(channel, guild_b)
         if not isinstance(mirror, discord.TextChannel):
             continue
