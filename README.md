@@ -11,6 +11,7 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 - Impersonates the original sender (nickname + avatar) via webhooks
 - Copies attachments (images, files, etc.)
 - Preserves reply context as a quote prefix
+- Translates role mentions to use Server B role IDs (so @role mentions resolve correctly)
 - Mirrors all reactions (emoji) from the original message to the copy, including reactions added after sync
 - Auto-creates missing channels in Server B on the fly
 
