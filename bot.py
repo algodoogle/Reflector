@@ -879,10 +879,9 @@ async def on_ready() -> None:
         last_id = message_state.get(str(channel.id))
         after = discord.Object(id=last_id) if last_id else None
 
-        async for message in channel.history(after=after, oldest_first=True, limit=None):
+        async for message in channel.history(after=after, oldest_first=True, limit=None, ):
+            log.debug("Detected unsynced message %s in #%s from author %s", message.id, channel.name, message.author.name)
             record_mirrored(channel.id, message.id)
-            if message.author.bot:
-                continue
             try:
                 await mirror_message(message, mirror)
             except Exception as e:
