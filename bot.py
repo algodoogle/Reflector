@@ -533,6 +533,13 @@ async def sync_roles(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
     for role in reversed(guild_a.roles):
         if role.is_default(): # Skip @everyone
             continue
+        log.debug("Processing role %s with id %s", role.name, role.id)
+
+        b_role_names = {r.name for r in guild_b.roles}
+        if role.name in b_role_names:
+            log.info("Role '%s' already exists in Server B, skipping creation", role.name)
+            continue
+        
         key = str(role.id)
         if key in role_map:
             b_role = guild_b.get_role(role_map[key])
