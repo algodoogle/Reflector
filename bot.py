@@ -834,8 +834,8 @@ async def on_ready() -> None:
         log.error("Bot is not in both guilds.")
         return
 
-    #log.info("Syncing roles...")
-    #await sync_roles(guild_a, guild_b)
+    log.info("Syncing roles...")
+    await sync_roles(guild_a, guild_b)
 
     log.info("Syncing channel structure and permissions...")
     await sync_channel_structure(guild_a, guild_b)
@@ -845,8 +845,8 @@ async def on_ready() -> None:
         log.debug("Updating guild icon from Server A")
         await guild_b.edit(icon=await guild_a.icon.read())
 
-    #log.info("Syncing member roles...")
-    #await sync_member_roles(guild_a, guild_b)
+    log.info("Syncing member roles...")
+    await sync_member_roles(guild_a, guild_b)
 
     # log.info("Syncing emojis...")
     # await sync_emojis(guild_a, guild_b)
