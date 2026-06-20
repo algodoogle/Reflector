@@ -501,15 +501,16 @@ async def apply_member_roles(member_a: discord.Member, guild_b: discord.Guild) -
 async def _assign_roles_in_b(b_member: discord.Member) -> None:
     """Assign Server B roles from the saved member_roles state. No Server A lookup needed."""
     guild_b = b_member.guild
-    bot_member = guild_b.get_member(bot.user.id)
-    bot_top = bot_member.top_role.position if bot_member else 0
 
     desired = []
     for a_role_id in member_roles.get(str(b_member.id), []):
         mapped_id = role_map.get(str(a_role_id))
         if mapped_id:
             b_role = guild_b.get_role(mapped_id)
-            desired.append(b_role)
+            if b_role:
+                desired.append(b_role)
+            else:
+                log.warning("Mapped role ID %s for member %s does not exist in Server B", mapped_id, b_member)
 
     desired_ids = {r.id for r in desired}
     current_ids = {r.id for r in b_member.roles if not r.is_default()}
@@ -528,9 +529,9 @@ async def _assign_roles_in_b(b_member: discord.Member) -> None:
 # ---------------------------------------------------------------------------
 
 async def sync_roles(guild_a: discord.Guild, guild_b: discord.Guild) -> None:
-    changed = False
-    for role in guild_a.roles:
-        if role.is_default():
+    changed = False 
+    for role in reversed(guild_a.roles):
+        if role.is_default(): # Skip @everyone
             continue
         key = str(role.id)
         if key in role_map:
