@@ -9,7 +9,7 @@ A Discord bot that mirrors one server (Server A) to another (Server B) as a live
 ### Live mirroring
 - Mirrors every message from all text channels in Server A to Server B
 - Impersonates the original sender (nickname + avatar) via webhooks
-- Copies attachments (images, files, etc.)
+- Copies attachments (images, files, etc.); attachments over the upload limit are compressed under it where possible (images/GIF → WebP, video → mp4, audio → mp3) or, failing that, linked to the original
 - Preserves reply context as a quote prefix
 - Translates role mentions to use Server B role IDs (so @role mentions resolve correctly)
 - Mirrors all reactions (emoji) from the original message to the copy, including reactions added after sync
@@ -88,8 +88,16 @@ cd Reflector
 python3 -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -U pip
-pip install discord.py python-dotenv
+pip install -r requirements.txt
 ```
+
+### Optional: ffmpeg (for video/audio compression)
+
+Oversized **video and audio** attachments are compressed with `ffmpeg` before
+re-upload. Install `ffmpeg` (which includes `ffprobe`) and ensure both are on
+your `PATH`. If ffmpeg is not installed, the bot still runs — oversized video
+and audio simply fall back to a link to the original file. Oversized **images
+and GIFs** are compressed with Pillow and do not need ffmpeg.
 
 ### 2. Create a `.env` file
 
@@ -103,6 +111,9 @@ CHANNEL_BLACKLIST=
 - `DISCORD_TOKEN` — Your bot's token from the Discord Developer Portal
 - `LOG_LEVEL` — Logging level (DEBUG, INFO, WARNING, ERROR)
 - `CHANNEL_BLACKLIST` — *Optional* — Comma-separated channel IDs to exclude from startup history sync. Blacklisted channels will still receive live messages after startup completes. Spaces are supported: `123, 456, 789`
+- `MAX_UPLOAD_BYTES` — *Optional* — Attachments larger than this (bytes) are compressed or linked. Default `10485760` (10 MB). Set to your Server B upload limit.
+- `FFMPEG_TIMEOUT_SECONDS` — *Optional* — Max seconds for one video/audio encode before falling back to a link. Default `300`.
+- `MAX_COMPRESS_INPUT_BYTES` — *Optional* — Inputs larger than this (bytes) are linked without attempting compression. Default `524288000` (500 MB).
 
 ### 3. Configure server IDs
 
