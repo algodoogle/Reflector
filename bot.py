@@ -10,6 +10,8 @@ import discord
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+from media import prepare_message_files
+
 load_dotenv()
 
 # ---------------------------------------------------------------------------
@@ -23,7 +25,7 @@ _fmt   = logging.Formatter(
 )
 
 _console = logging.StreamHandler()
-_console.setFormatter(_fmt)
+_console.setFormatter(_fmt) 
 
 _file = logging.FileHandler("reflector.log", encoding="utf-8")
 _file.setFormatter(_fmt)
@@ -31,6 +33,10 @@ _file.setFormatter(_fmt)
 logging.root.setLevel(_level)
 logging.root.addHandler(_console)
 logging.root.addHandler(_file)
+
+# Pillow logs every image-plugin import at DEBUG, flooding the log on each
+# image it opens. Keep it quiet regardless of the bot's own log level.
+logging.getLogger("PIL").setLevel(logging.INFO)
 
 log = logging.getLogger("reflector")
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -394,20 +400,9 @@ async def mirror_message(
     """Send one message to the destination channel via webhook. Returns True if sent."""
     webhook = await get_webhook(destination)
 
-    # Attachments larger than Server B's upload limit can't be re-uploaded
-    # (413 Payload Too Large) — link to the original instead.
-    size_limit = destination.guild.filesize_limit
-    files = []
-    oversized_links = []
-    for attachment in message.attachments:
-        if attachment.size > size_limit:
-            log.warning(
-                "Attachment '%s' (%d B) exceeds Server B limit (%d B) — linking instead",
-                attachment.filename, attachment.size, size_limit,
-            )
-            oversized_links.append(attachment.url)
-            continue
-        files.append(await attachment.to_file())
+    # Attachments over the upload limit are compressed (images/GIF/video/audio)
+    # or linked to the original CDN url. See the media package.
+    files, oversized_links = await prepare_message_files(message.attachments)
 
     content = message.content
     
